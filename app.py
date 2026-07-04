@@ -349,7 +349,7 @@ def yield_top_chart(df: pd.DataFrame, n: int = 10):
 
 
 def main():
-    st.set_page_config(page_title="日本 高配当株 ダッシュボード", page_icon="📈", layout="wide")
+    st.set_page_config(page_title="日米 高配当株 ダッシュボード", page_icon="📈", layout="wide")
 
     now = dt.datetime.now(JST)
     is_open = market_is_open(now)
@@ -369,7 +369,7 @@ def main():
     h1.markdown(
         f"""<div style="background:linear-gradient(90deg,#0D2B52,#1565C0);border-radius:14px;
         padding:18px 24px;color:#fff;">
-        <span style="font-size:1.55em;font-weight:800;">📈 日本 高配当株 ダッシュボード</span>
+        <span style="font-size:1.55em;font-weight:800;">📈 日米 高配当株 ダッシュボード</span>
         <span style="margin-left:14px;font-size:.85em;opacity:.9;">{status}　|　最終更新 {now:%m/%d %H:%M} JST</span>
         </div>""",
         unsafe_allow_html=True,
