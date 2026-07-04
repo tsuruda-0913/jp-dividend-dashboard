@@ -295,10 +295,11 @@ def main():
         unsafe_allow_html=True,
     )
     with h2:
-        st.write("")
         if st.button("🔄 今すぐ更新", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
+        if st.button("🇺🇸 米国ETF分析", use_container_width=True):
+            st.switch_page("pages/2_米国ETF分析.py")
 
     # --- データ取得 ---
     try:
