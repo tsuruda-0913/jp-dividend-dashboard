@@ -93,7 +93,8 @@ def is_us(code: str) -> bool:
 
 def _to_float(val):
     try:
-        return float(str(val).replace(",", "").strip())
+        f = float(str(val).replace(",", "").strip())
+        return None if pd.isna(f) else f
     except (ValueError, TypeError):
         return None
 
