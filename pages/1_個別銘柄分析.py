@@ -267,6 +267,10 @@ def main():
     stocks = get_stock_list()
     labels = [f"{s['code']}_{s['name']}" for s in stocks]
 
+    # サイドバーに一覧へ戻るボタン
+    if st.sidebar.button("← 銘柄一覧に戻る", use_container_width=True):
+        st.switch_page("app.py")
+
     # サイドバーで銘柄選択
     default = st.session_state.get("selected_label", labels[0] if labels else "")
     choice = st.sidebar.selectbox("銘柄を選択", labels, index=labels.index(default) if default in labels else 0)

@@ -4,3 +4,8 @@ primaryColor = "#1976D2"
 
 [server]
 headless = true
+
+[client]
+# サイドバーの自動ページ一覧（タブ）を非表示にする。
+# 個別銘柄分析ページへは、ダッシュボードの表の行クリックで遷移する。
+showSidebarNavigation = false
