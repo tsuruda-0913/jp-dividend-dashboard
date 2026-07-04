@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
+import plotly.graph_objects as go
 import yfinance as yf
 
 from stocks import load_stocks, ticker_of
@@ -198,33 +199,158 @@ def style_table(df: pd.DataFrame):
     return styler
 
 
+def kpi_card(col, label, value, sub, gradient, icon=""):
+    """グラデーション背景のKPIカードを描画する。"""
+    col.markdown(
+        f"""<div style="background:linear-gradient(135deg,{gradient});border-radius:14px;
+        padding:14px 16px;color:#fff;box-shadow:0 4px 10px rgba(0,0,0,.12);min-height:104px;">
+        <div style="font-size:.78em;opacity:.9;letter-spacing:.05em;">{icon} {label}</div>
+        <div style="font-size:1.7em;font-weight:800;line-height:1.4;">{value}</div>
+        <div style="font-size:.75em;opacity:.85;">{sub}</div></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def color_for_decline(chg: float) -> str:
+    """前日比(%)から棒グラフ用の色を返す。"""
+    if chg >= 0:
+        return "#2E7D32"
+    b = bucket_for(-chg)
+    return b[0] if b else "#E57373"
+
+
+def decline_top_chart(df: pd.DataFrame, n: int = 10):
+    """本日の下落TOP n 横棒グラフ。"""
+    d = df.dropna(subset=["前日比(%)"]).nsmallest(n, "前日比(%)")
+    d = d[d["前日比(%)"] < 0]
+    if d.empty:
+        return None
+    d = d.iloc[::-1]  # 大きい下落を上に
+    fig = go.Figure(
+        go.Bar(
+            x=d["前日比(%)"], y=d["銘柄"], orientation="h",
+            marker_color=[color_for_decline(v) for v in d["前日比(%)"]],
+            text=[f"{v:+.2f}%" for v in d["前日比(%)"]],
+            textposition="outside", cliponaxis=False,
+            customdata=d["コード"],
+            hovertemplate="%{y} (%{customdata})<br>前日比 %{x:+.2f}%<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=360, margin=dict(l=10, r=50, t=10, b=10),
+        xaxis_title="前日比(%)", yaxis=dict(tickfont=dict(size=11)),
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
+def yield_top_chart(df: pd.DataFrame, n: int = 10):
+    """配当利回りTOP n 横棒グラフ。"""
+    d = df.dropna(subset=["配当利回り(%)"]).nlargest(n, "配当利回り(%)")
+    if d.empty:
+        return None
+    d = d.iloc[::-1]
+    fig = go.Figure(
+        go.Bar(
+            x=d["配当利回り(%)"], y=d["銘柄"], orientation="h",
+            marker=dict(color=d["配当利回り(%)"], colorscale=[[0, "#90CAF9"], [1, "#1565C0"]]),
+            text=[f"{v:.2f}%" for v in d["配当利回り(%)"]],
+            textposition="outside", cliponaxis=False,
+            customdata=d["コード"],
+            hovertemplate="%{y} (%{customdata})<br>利回り %{x:.2f}%<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        height=360, margin=dict(l=10, r=50, t=10, b=10),
+        xaxis_title="配当利回り(%)", yaxis=dict(tickfont=dict(size=11)),
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
+    return fig
+
+
 def main():
     st.set_page_config(page_title="日本 高配当株 ダッシュボード", page_icon="📈", layout="wide")
 
     now = dt.datetime.now(JST)
     is_open = market_is_open(now)
 
-    st.title("📈 日本 高配当株 モニタリング ダッシュボード")
+    # --- 全体の軽いスタイル調整 ---
+    st.markdown(
+        """<style>
+        .block-container {padding-top: 1.2rem;}
+        div[data-testid="stTabs"] button p {font-size: 1.0em; font-weight: 600;}
+        </style>""",
+        unsafe_allow_html=True,
+    )
 
+    # --- ヘッダーバナー ---
     status = "🟢 ザラ場中" if is_open else "⚪ 市場時間外"
-    c1, c2 = st.columns([3, 1])
-    c1.caption(f"現在値・前日比は yfinance のライブ値（更新ボタンで最新化）　|　{status}")
-    c2.caption(f"最終更新: {now:%Y-%m-%d %H:%M:%S} JST")
-    if c2.button("🔄 今すぐ更新"):
-        st.cache_data.clear()
-        st.rerun()
+    h1, h2 = st.columns([5, 1])
+    h1.markdown(
+        f"""<div style="background:linear-gradient(90deg,#0D2B52,#1565C0);border-radius:14px;
+        padding:18px 24px;color:#fff;">
+        <span style="font-size:1.55em;font-weight:800;">📈 日本 高配当株 ダッシュボード</span>
+        <span style="margin-left:14px;font-size:.85em;opacity:.9;">{status}　|　最終更新 {now:%m/%d %H:%M} JST</span>
+        </div>""",
+        unsafe_allow_html=True,
+    )
+    with h2:
+        st.write("")
+        if st.button("🔄 今すぐ更新", use_container_width=True):
+            st.cache_data.clear()
+            st.rerun()
 
-    st.divider()
-
-    # --- 株価・財務指標の表 ---
+    # --- データ取得 ---
     try:
         df = fetch_prices()
-        st.caption(
-            f"📋 Google スプレッドシートの銘柄リスト・財務指標を反映（{len(df)} 銘柄）。"
-            "現在値と前日比のみライブ取得。前日比が小さい（下落が大きい）順に表示。"
-        )
-        st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。")
-        # 前日比が小さい（＝下落が大きい）順に並べ、位置インデックスを揃える
+    except Exception as e:
+        st.error(f"株価データの取得に失敗しました: {e}")
+        return
+
+    chg = df["前日比(%)"].dropna()
+    up_n = int((chg > 0).sum())
+    down_n = int((chg < 0).sum())
+    avg_chg = chg.mean() if not chg.empty else None
+    avg_yield = df["配当利回り(%)"].dropna().mean()
+    if not chg.empty:
+        worst = df.loc[df["前日比(%)"].idxmin()]
+        worst_txt, worst_sub = f"{worst['前日比(%)']:+.2f}%", worst["銘柄"]
+    else:
+        worst_txt, worst_sub = "—", ""
+
+    # --- KPIカード ---
+    st.write("")
+    k = st.columns(5)
+    kpi_card(k[0], "監視銘柄", f"{len(df)}", "Googleシート連携", "#42A5F5,#1565C0", "📋")
+    kpi_card(k[1], "上昇 / 下落", f"{up_n} / {down_n}", "前日比ベース", "#66BB6A,#2E7D32", "⚖️")
+    kpi_card(k[2], "平均前日比", f"{avg_chg:+.2f}%" if avg_chg is not None else "—", "全銘柄平均", "#FFB74D,#EF6C00", "📊")
+    kpi_card(k[3], "平均配当利回り", f"{avg_yield:.2f}%" if pd.notna(avg_yield) else "—", "シート値の平均", "#AB47BC,#6A1B9A", "💰")
+    kpi_card(k[4], "本日の最大下落", worst_txt, worst_sub, "#EF5350,#B71C1C", "📉")
+
+    st.write("")
+
+    # --- グラフ 2枚 ---
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("##### 📉 本日の下落 TOP10")
+        fig = decline_top_chart(df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("本日下落している銘柄はありません。")
+    with g2:
+        st.markdown("##### 💰 配当利回り TOP10")
+        fig = yield_top_chart(df)
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("配当利回りデータがありません。")
+
+    # --- タブ: 銘柄一覧 / ニュース ---
+    tab_list, tab_news = st.tabs(["📋 銘柄一覧", "📰 ニュース"])
+
+    with tab_list:
+        st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
         sorted_df = (
             df.sort_values("前日比(%)", ascending=True, na_position="last")
             .reset_index(drop=True)
@@ -233,7 +359,7 @@ def main():
             style_table(sorted_df),
             use_container_width=True,
             hide_index=True,
-            height=740,
+            height=600,
             on_select="rerun",
             selection_mode="single-row",
             key="stock_table",
@@ -248,28 +374,24 @@ def main():
             r = sorted_df.iloc[selected[0]]
             st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
             st.switch_page("pages/1_個別銘柄分析.py")
-    except Exception as e:
-        st.error(f"株価データの取得に失敗しました: {e}")
 
-    st.divider()
-
-    # --- ニュース・タイムライン ---
-    st.subheader("📰 株価・経済ニュース タイムライン")
-    try:
-        news = fetch_news()
-        if not news:
-            st.info("ニュースを取得できませんでした（ネットワークまたはRSSの状態をご確認ください）。")
-        for it in news:
-            ts = it["published"].strftime("%m/%d %H:%M") if it["published"] else "--/-- --:--"
-            st.markdown(
-                f"<div style='border-left:3px solid #1976D2;padding:4px 12px;margin:6px 0;'>"
-                f"<span style='color:#888;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
-                f"<a href='{it['link']}' target='_blank' style='text-decoration:none;font-weight:600;'>"
-                f"{it['title']}</a></div>",
-                unsafe_allow_html=True,
-            )
-    except Exception as e:
-        st.warning(f"ニュースの取得に失敗しました: {e}")
+    with tab_news:
+        try:
+            news = fetch_news()
+            if not news:
+                st.info("ニュースを取得できませんでした（ネットワークまたはRSSの状態をご確認ください）。")
+            for it in news:
+                ts = it["published"].strftime("%m/%d %H:%M") if it["published"] else "--/-- --:--"
+                st.markdown(
+                    f"<div style='border-left:3px solid #1976D2;background:rgba(25,118,210,.04);"
+                    f"border-radius:0 8px 8px 0;padding:6px 12px;margin:8px 0;'>"
+                    f"<span style='color:#888;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
+                    f"<a href='{it['link']}' target='_blank' style='text-decoration:none;font-weight:600;'>"
+                    f"{it['title']}</a></div>",
+                    unsafe_allow_html=True,
+                )
+        except Exception as e:
+            st.warning(f"ニュースの取得に失敗しました: {e}")
 
 
 if __name__ == "__main__":
