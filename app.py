@@ -23,7 +23,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import yfinance as yf
 
-from stocks import load_stocks, ticker_of
+from stocks import load_stocks, load_us_stocks, ticker_of
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -103,6 +103,86 @@ def fetch_prices() -> pd.DataFrame:
 
     out = pd.DataFrame(rows)
     return out
+
+
+@st.cache_data(ttl=3600, show_spinner="米国株の株価・指標を取得中…")
+def fetch_prices_us() -> pd.DataFrame:
+    """米国株リストを読み込み、株価・前日比・利回り等を取得した DataFrame を返す。"""
+    from concurrent.futures import ThreadPoolExecutor
+
+    stocks = load_us_stocks()
+    tickers = [s["code"] for s in stocks]
+    raw = yf.download(
+        tickers,
+        period="5d",
+        interval="1d",
+        group_by="ticker",
+        auto_adjust=False,
+        progress=False,
+        threads=True,
+    )
+
+    # 配当利回り・セクターは info から並列取得（シートに利回りがあればそちら優先）
+    def get_info(sym: str) -> dict:
+        try:
+            info = yf.Ticker(sym).info or {}
+            # dividendYield は現行の yfinance では%値（例: 3.37）で返る
+            return {"yield": info.get("dividendYield"), "sector": info.get("sector")}
+        except Exception:
+            return {"yield": None, "sector": None}
+
+    need_info = [s["code"] for s in stocks]
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        infos = dict(zip(need_info, ex.map(get_info, need_info)))
+
+    rows = []
+    for s in stocks:
+        tk = s["code"]
+        try:
+            df = raw[tk] if len(tickers) > 1 else raw
+            close = df["Close"].dropna()
+            if close.empty:
+                raise ValueError("no data")
+            current = float(close.iloc[-1])
+            prev = float(close.iloc[-2]) if len(close) >= 2 else current
+            day_chg = (current - prev) / prev * 100 if prev else None
+        except Exception:
+            current = day_chg = None
+
+        inf = infos.get(tk, {})
+        rows.append(
+            {
+                "銘柄": s["name"],
+                "コード": tk,
+                "セクター": inf.get("sector") or "—",
+                "現在値($)": current,
+                "前日比(%)": day_chg,
+                "配当利回り(%)": s.get("yield") if s.get("yield") is not None else inf.get("yield"),
+                "Yahoo": s.get("yahoo_url", ""),
+                "企業情報": s.get("info_url", ""),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def style_table_us(df: pd.DataFrame):
+    """米国株テーブル用の Styler（前日比を下落幅で色分け）。"""
+
+    def color_daychg(val):
+        if val is None or pd.isna(val):
+            return ""
+        if val >= 0:
+            return "color: #2E7D32;"
+        b = bucket_for(-val)
+        if b is None:
+            return "color: #C62828;"
+        bg, text, _ = b
+        return f"background-color: {bg}; color: {text}; font-weight: 600;"
+
+    return df.style.map(color_daychg, subset=["前日比(%)"]).format(
+        {"現在値($)": "{:,.2f}", "前日比(%)": "{:+.2f}%", "配当利回り(%)": "{:.2f}%"},
+        na_rep="—",
+    )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -301,13 +381,86 @@ def main():
         if st.button("🇺🇸 米国ETF分析", use_container_width=True):
             st.switch_page("pages/2_米国ETF分析.py")
 
-    # --- データ取得 ---
-    try:
-        df = fetch_prices()
-    except Exception as e:
-        st.error(f"株価データの取得に失敗しました: {e}")
-        return
+    # --- 市場タブ ---
+    tab_jp, tab_us = st.tabs(["🇯🇵 日本株", "🇺🇸 米国株"])
 
+    # ------------------------------------------------------------ 日本株
+    with tab_jp:
+        try:
+            df = fetch_prices()
+        except Exception as e:
+            st.error(f"株価データの取得に失敗しました: {e}")
+            df = None
+
+        if df is not None:
+            render_overview(df, list_sub="Googleシート連携")
+
+            sub_list, sub_news = st.tabs(["📋 銘柄一覧", "📰 ニュース"])
+            with sub_list:
+                st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
+                sorted_df = (
+                    df.sort_values("前日比(%)", ascending=True, na_position="last")
+                    .reset_index(drop=True)
+                )
+                event = st.dataframe(
+                    style_table(sorted_df),
+                    use_container_width=True,
+                    hide_index=True,
+                    height=600,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="stock_table_jp",
+                    column_config={
+                        "IRBANK": st.column_config.LinkColumn("IRBANK", display_text="決算情報"),
+                        "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
+                    },
+                )
+                selected = event.selection.rows if event and event.selection else []
+                if selected:
+                    r = sorted_df.iloc[selected[0]]
+                    st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
+                    st.switch_page("pages/1_個別銘柄分析.py")
+            with sub_news:
+                render_news()
+
+    # ------------------------------------------------------------ 米国株
+    with tab_us:
+        try:
+            df_us = fetch_prices_us()
+        except Exception as e:
+            st.error(f"米国株データの取得に失敗しました: {e}")
+            df_us = None
+
+        if df_us is not None:
+            render_overview(df_us, list_sub="シートの米国株タブ連携")
+
+            st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
+            sorted_us = (
+                df_us.sort_values("前日比(%)", ascending=True, na_position="last")
+                .reset_index(drop=True)
+            )
+            event_us = st.dataframe(
+                style_table_us(sorted_us),
+                use_container_width=True,
+                hide_index=True,
+                height=600,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="stock_table_us",
+                column_config={
+                    "Yahoo": st.column_config.LinkColumn("Yahoo", display_text="Yahoo Finance"),
+                    "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
+                },
+            )
+            selected_us = event_us.selection.rows if event_us and event_us.selection else []
+            if selected_us:
+                r = sorted_us.iloc[selected_us[0]]
+                st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
+                st.switch_page("pages/1_個別銘柄分析.py")
+
+
+def render_overview(df: pd.DataFrame, list_sub: str):
+    """KPIカードと下落/利回りTOP10グラフを描画する（日米共通）。"""
     chg = df["前日比(%)"].dropna()
     up_n = int((chg > 0).sum())
     down_n = int((chg < 0).sum())
@@ -319,18 +472,15 @@ def main():
     else:
         worst_txt, worst_sub = "—", ""
 
-    # --- KPIカード ---
     st.write("")
     k = st.columns(5)
-    kpi_card(k[0], "監視銘柄", f"{len(df)}", "Googleシート連携", "#42A5F5,#1565C0", "📋")
+    kpi_card(k[0], "監視銘柄", f"{len(df)}", list_sub, "#42A5F5,#1565C0", "📋")
     kpi_card(k[1], "上昇 / 下落", f"{up_n} / {down_n}", "前日比ベース", "#66BB6A,#2E7D32", "⚖️")
     kpi_card(k[2], "平均前日比", f"{avg_chg:+.2f}%" if avg_chg is not None else "—", "全銘柄平均", "#FFB74D,#EF6C00", "📊")
-    kpi_card(k[3], "平均配当利回り", f"{avg_yield:.2f}%" if pd.notna(avg_yield) else "—", "シート値の平均", "#AB47BC,#6A1B9A", "💰")
+    kpi_card(k[3], "平均配当利回り", f"{avg_yield:.2f}%" if pd.notna(avg_yield) else "—", "全銘柄平均", "#AB47BC,#6A1B9A", "💰")
     kpi_card(k[4], "本日の最大下落", worst_txt, worst_sub, "#EF5350,#B71C1C", "📉")
 
     st.write("")
-
-    # --- グラフ 2枚 ---
     g1, g2 = st.columns(2)
     with g1:
         st.markdown("##### 📉 本日の下落 TOP10")
@@ -347,52 +497,25 @@ def main():
         else:
             st.info("配当利回りデータがありません。")
 
-    # --- タブ: 銘柄一覧 / ニュース ---
-    tab_list, tab_news = st.tabs(["📋 銘柄一覧", "📰 ニュース"])
 
-    with tab_list:
-        st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
-        sorted_df = (
-            df.sort_values("前日比(%)", ascending=True, na_position="last")
-            .reset_index(drop=True)
-        )
-        event = st.dataframe(
-            style_table(sorted_df),
-            use_container_width=True,
-            hide_index=True,
-            height=600,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="stock_table",
-            column_config={
-                "IRBANK": st.column_config.LinkColumn("IRBANK", display_text="決算情報"),
-                "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
-            },
-        )
-        # 行が選択されたら、その銘柄を個別分析ページで開く
-        selected = event.selection.rows if event and event.selection else []
-        if selected:
-            r = sorted_df.iloc[selected[0]]
-            st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
-            st.switch_page("pages/1_個別銘柄分析.py")
-
-    with tab_news:
-        try:
-            news = fetch_news()
-            if not news:
-                st.info("ニュースを取得できませんでした（ネットワークまたはRSSの状態をご確認ください）。")
-            for it in news:
-                ts = it["published"].strftime("%m/%d %H:%M") if it["published"] else "--/-- --:--"
-                st.markdown(
-                    f"<div style='border-left:3px solid #1976D2;background:rgba(25,118,210,.04);"
-                    f"border-radius:0 8px 8px 0;padding:6px 12px;margin:8px 0;'>"
-                    f"<span style='color:#888;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
-                    f"<a href='{it['link']}' target='_blank' style='text-decoration:none;font-weight:600;'>"
-                    f"{it['title']}</a></div>",
-                    unsafe_allow_html=True,
-                )
-        except Exception as e:
-            st.warning(f"ニュースの取得に失敗しました: {e}")
+def render_news():
+    """ニュースタイムラインを描画する。"""
+    try:
+        news = fetch_news()
+        if not news:
+            st.info("ニュースを取得できませんでした（ネットワークまたはRSSの状態をご確認ください）。")
+        for it in news:
+            ts = it["published"].strftime("%m/%d %H:%M") if it["published"] else "--/-- --:--"
+            st.markdown(
+                f"<div style='border-left:3px solid #1976D2;background:rgba(25,118,210,.04);"
+                f"border-radius:0 8px 8px 0;padding:6px 12px;margin:8px 0;'>"
+                f"<span style='color:#888;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
+                f"<a href='{it['link']}' target='_blank' style='text-decoration:none;font-weight:600;'>"
+                f"{it['title']}</a></div>",
+                unsafe_allow_html=True,
+            )
+    except Exception as e:
+        st.warning(f"ニュースの取得に失敗しました: {e}")
 
 
 if __name__ == "__main__":

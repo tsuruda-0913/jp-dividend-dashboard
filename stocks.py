@@ -10,6 +10,7 @@
 """
 
 import io
+import re
 import urllib.parse
 import urllib.request
 
@@ -27,9 +28,67 @@ FALLBACK_STOCKS = [
 ]
 
 
+# 米国株タブの名前（スプレッドシート内のワークシート名）
+US_SHEET_NAME = "米国株"
+US_SHEET_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv"
+    f"&sheet={urllib.parse.quote(US_SHEET_NAME)}"
+)
+
+# 米国株タブが未作成・読込失敗時に使う代表的な米国高配当株。
+FALLBACK_US_STOCKS = [
+    {"code": "KO", "name": "コカ・コーラ"},
+    {"code": "PEP", "name": "ペプシコ"},
+    {"code": "PG", "name": "P&G"},
+    {"code": "JNJ", "name": "ジョンソン・エンド・ジョンソン"},
+    {"code": "ABBV", "name": "アッヴィ"},
+    {"code": "MRK", "name": "メルク"},
+    {"code": "PFE", "name": "ファイザー"},
+    {"code": "XOM", "name": "エクソンモービル"},
+    {"code": "CVX", "name": "シェブロン"},
+    {"code": "VZ", "name": "ベライゾン"},
+    {"code": "T", "name": "AT&T"},
+    {"code": "MO", "name": "アルトリア"},
+    {"code": "PM", "name": "フィリップモリス"},
+    {"code": "IBM", "name": "IBM"},
+    {"code": "CSCO", "name": "シスコシステムズ"},
+    {"code": "TXN", "name": "テキサス・インスツルメンツ"},
+    {"code": "MCD", "name": "マクドナルド"},
+    {"code": "HD", "name": "ホーム・デポ"},
+    {"code": "MMM", "name": "スリーエム"},
+    {"code": "CAT", "name": "キャタピラー"},
+    {"code": "JPM", "name": "JPモルガン・チェース"},
+    {"code": "USB", "name": "USバンコープ"},
+    {"code": "O", "name": "リアルティ・インカム"},
+    {"code": "DUK", "name": "デューク・エナジー"},
+    {"code": "SO", "name": "サザン"},
+    {"code": "ED", "name": "コンソリデーテッド・エジソン"},
+    {"code": "KMB", "name": "キンバリークラーク"},
+    {"code": "GILD", "name": "ギリアド・サイエンシズ"},
+    {"code": "LMT", "name": "ロッキード・マーチン"},
+    {"code": "UPS", "name": "UPS"},
+]
+
+
 def ticker_of(code: str) -> str:
-    """証券コードを yfinance 用のティッカー（例: 8058.T）に変換する。"""
-    return f"{code}.T"
+    """コードを yfinance 用ティッカーに変換する。
+
+    数字のみ（日本株の証券コード）→ 末尾に .T を付与（例: 8058.T）
+    英字を含む（米国株ティッカー・483Aなど英数字混在の日本コード）:
+      日本株の新形式コード（4桁英数字）は .T、純粋な英字ティッカーはそのまま。
+    """
+    code = code.strip().upper()
+    if code.isdigit():
+        return f"{code}.T"
+    # 「483A」のような日本の英数字混在コード（数字始まり4桁）は東証
+    if len(code) == 4 and code[0].isdigit():
+        return f"{code}.T"
+    return code
+
+
+def is_us(code: str) -> bool:
+    """コードが米国株ティッカーかどうか。"""
+    return not ticker_of(code).endswith(".T")
 
 
 def _to_float(val):
@@ -108,3 +167,55 @@ def load_stocks() -> list[dict]:
         return stocks
     except Exception:
         return FALLBACK_STOCKS
+
+
+def load_us_stocks() -> list[dict]:
+    """スプレッドシートの「米国株」タブから銘柄リストを読み込む。
+
+    必要な列: 「ティッカー」（または「コード」）と「銘柄名」。任意で「配当利回り」。
+    タブが無い・読めない場合は FALLBACK_US_STOCKS を返す。
+    返す各要素の例:
+      {"code": "KO", "name": "コカ・コーラ", "yield": 3.1,
+       "yahoo_url": "https://finance.yahoo.com/quote/KO",
+       "info_url": "https://www.google.com/search?q=..."}
+    """
+    def enrich(s: dict) -> dict:
+        code = s["code"]
+        s.setdefault("yield", None)
+        s["yahoo_url"] = f"https://finance.yahoo.com/quote/{code}"
+        s["info_url"] = "https://www.google.com/search?q=" + urllib.parse.quote(
+            f"{code} {s['name']} 株価"
+        )
+        return s
+
+    try:
+        req = urllib.request.Request(US_SHEET_CSV_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8")
+        df = pd.read_csv(io.StringIO(raw), dtype=str)
+        df = df.rename(columns={c: c.strip() for c in df.columns})
+
+        code_col = next((c for c in df.columns if "ティッカー" in c or "コード" in c), None)
+        name_col = next((c for c in df.columns if "銘柄" in c or "名称" in c), None)
+        yield_col = next((c for c in df.columns if "配当利回り" in c or "利回り" in c), None)
+        if code_col is None:
+            raise ValueError("ティッカー列が見つかりません")
+
+        stocks = []
+        for _, row in df.iterrows():
+            code = _text(row[code_col]).upper()
+            # 米国ティッカー形式（英字1〜5文字、.- 可）のみ受け付ける。
+            # ※「米国株」タブが未作成だと gviz は既定シート（日本株）を返すため、
+            #   日本の証券コードが混ざった場合はここで弾いてフォールバックさせる。
+            if not code or not re.fullmatch(r"[A-Z][A-Z.\-]{0,5}", code):
+                continue
+            stocks.append(enrich({
+                "code": code,
+                "name": _text(row[name_col]) if name_col else code,
+                "yield": _to_float(row[yield_col]) if yield_col else None,
+            }))
+        if not stocks:
+            raise ValueError("米国株の銘柄が0件でした")
+        return stocks
+    except Exception:
+        return [enrich(dict(s)) for s in FALLBACK_US_STOCKS]

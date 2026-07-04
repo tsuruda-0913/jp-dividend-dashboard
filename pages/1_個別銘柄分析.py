@@ -14,7 +14,7 @@ import yfinance as yf
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from stocks import load_stocks, ticker_of
+from stocks import load_stocks, load_us_stocks, ticker_of, is_us
 
 st.set_page_config(page_title="個別銘柄分析", page_icon="🔎", layout="wide")
 
@@ -26,7 +26,14 @@ RADAR_AXES = ["安全性", "配当性", "成長性", "効率性", "収益性", "
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_list() -> list[dict]:
-    return load_stocks()
+    """日本株＋米国株を統合したリストを返す。"""
+    jp = load_stocks()
+    us = []
+    for s in load_us_stocks():
+        s = dict(s)
+        s.setdefault("market", "米国")
+        us.append(s)
+    return jp + us
 
 
 @st.cache_data(ttl=3600, show_spinner="財務データを取得中…")
@@ -127,12 +134,10 @@ def compute_metrics(detail: dict, sheet: dict) -> dict:
     if equity_ratio is None:
         equity_ratio = sheet.get("equity_ratio")
 
-    # 配当利回り(%)：シート優先、無ければ info（0〜1の場合は%に換算）
+    # 配当利回り(%)：シート優先、無ければ info（現行 yfinance は%値で返る）
     dy = sheet.get("yield")
     if dy is None:
-        raw = info.get("dividendYield")
-        if raw is not None:
-            dy = raw * 100 if raw < 1 else raw
+        dy = info.get("dividendYield")
 
     # 営業利益率(直近)
     op_margin = None
@@ -196,26 +201,26 @@ def fmt(v, spec="{:,.1f}", suffix=""):
     return spec.format(v) + suffix
 
 
-def perf_chart(m: dict):
+def perf_chart(m: dict, cur: str = "円"):
     rev, op, net = m["rev"], m["op"], m["net"]
     if rev is None:
         return None
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     years = [str(y) for y in rev.index]
-    fig.add_bar(x=years, y=(rev / 1e6), name="売上高(百万円)", marker_color="#9E9E9E", secondary_y=False)
+    fig.add_bar(x=years, y=(rev / 1e6), name=f"売上高(百万{cur})", marker_color="#9E9E9E", secondary_y=False)
     if op is not None:
         om = [_ratio(op, rev, y) for y in rev.index]
         fig.add_scatter(x=years, y=om, name="営業利益率", mode="lines+markers", line=dict(color="#EF5350"), secondary_y=True)
     if net is not None:
         nm = [_ratio(net, rev, y) for y in rev.index]
         fig.add_scatter(x=years, y=nm, name="純利益率", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
-    fig.update_yaxes(title_text="売上高(百万円)", secondary_y=False)
+    fig.update_yaxes(title_text=f"売上高(百万{cur})", secondary_y=False)
     fig.update_yaxes(title_text="利益率(%)", secondary_y=True)
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=1.15))
     return fig
 
 
-def finance_chart(m: dict):
+def finance_chart(m: dict, cur: str = "円"):
     equity, liab = m["equity"], m["liab"]
     if equity is None and liab is None:
         return None
@@ -223,19 +228,19 @@ def finance_chart(m: dict):
     base = equity if equity is not None else liab
     years = [str(y) for y in base.index]
     if equity is not None:
-        fig.add_bar(x=years, y=(equity / 1e6), name="純資産(百万円)", marker_color="#42A5F5", secondary_y=False)
+        fig.add_bar(x=years, y=(equity / 1e6), name=f"純資産(百万{cur})", marker_color="#42A5F5", secondary_y=False)
     if liab is not None:
-        fig.add_bar(x=[str(y) for y in liab.index], y=(-liab / 1e6), name="負債(百万円)", marker_color="#EF5350", secondary_y=False)
+        fig.add_bar(x=[str(y) for y in liab.index], y=(-liab / 1e6), name=f"負債(百万{cur})", marker_color="#EF5350", secondary_y=False)
     if m["assets"] is not None and equity is not None:
         er = [_ratio(equity, m["assets"], y) for y in equity.index]
         fig.add_scatter(x=years, y=er, name="自己資本比率", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
-    fig.update_yaxes(title_text="金額(百万円)", secondary_y=False)
+    fig.update_yaxes(title_text=f"金額(百万{cur})", secondary_y=False)
     fig.update_yaxes(title_text="自己資本比率(%)", secondary_y=True)
     fig.update_layout(height=340, margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h", y=1.15), barmode="relative")
     return fig
 
 
-def dividend_chart(detail: dict, m: dict):
+def dividend_chart(detail: dict, m: dict, cur: str = "円"):
     div = detail["dividends"]
     eps = row_series(detail["income"], "Diluted EPS", "Basic EPS")
     if (div is None or div.empty) and eps is None:
@@ -245,9 +250,9 @@ def dividend_chart(detail: dict, m: dict):
     if div is not None and not div.empty:
         div_year = div.groupby(div.index.year).sum()
         years = [str(y) for y in div_year.index]
-        fig.add_bar(x=years, y=div_year.values, name="配当(円)", marker_color="#42A5F5", secondary_y=False)
+        fig.add_bar(x=years, y=div_year.values, name=f"配当({cur})", marker_color="#42A5F5", secondary_y=False)
     if eps is not None:
-        fig.add_bar(x=[str(y) for y in eps.index], y=eps.values, name="EPS(円)", marker_color="#EF5350", secondary_y=False)
+        fig.add_bar(x=[str(y) for y in eps.index], y=eps.values, name=f"EPS({cur})", marker_color="#EF5350", secondary_y=False)
     if eps is not None and div_year is not None:
         payout = [_ratio(div_year, eps, y) for y in eps.index]
         fig.add_scatter(x=[str(y) for y in eps.index], y=payout, name="配当性向", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
@@ -290,12 +295,16 @@ def main():
     st.session_state["selected_label"] = choice
     sheet = stocks[labels.index(choice)]
 
+    us = is_us(sheet["code"])
+    cur = "$" if us else "円"
+
     detail = fetch_detail(ticker_of(sheet["code"]))
     m = compute_metrics(detail, sheet)
     scores, grade = compute_scores(m)
     info = detail["info"]
 
-    st.subheader(f"{sheet['code']}　{sheet['name']}")
+    flag = "🇺🇸" if us else "🇯🇵"
+    st.subheader(f"{flag} {sheet['code']}　{sheet['name']}")
 
     # --- 市場 / 業種 / 企業概要 / リンク ---
     c = st.columns([1, 1.4, 4, 2])
@@ -304,15 +313,18 @@ def main():
     c[1].markdown(f"**業種**\n\n{industry}")
     summary = info.get("longBusinessSummary") or "企業概要データなし"
     c[2].markdown(f"**企業概要**\n\n{summary[:140]}{'…' if len(summary) > 140 else ''}")
-    links = f"[IRBANK決算情報]({sheet.get('irbank_url','')})　[企業情報(Google)]({sheet.get('info_url','')})"
+    if us:
+        links = f"[Yahoo Finance]({sheet.get('yahoo_url','')})　[企業情報(Google)]({sheet.get('info_url','')})"
+    else:
+        links = f"[IRBANK決算情報]({sheet.get('irbank_url','')})　[企業情報(Google)]({sheet.get('info_url','')})"
     c[3].markdown(f"**リンク**\n\n{links}")
 
     st.divider()
 
     # --- KPIカード ---
     k = st.columns(7)
-    kpi_box(k[0], "株価(円)", fmt(m["price"], "{:,.0f}"), "#1565C0")
-    kpi_box(k[1], "時価総額(億円)", fmt(m["mcap_oku"], "{:,.0f}"), "#EF9A06")
+    kpi_box(k[0], f"株価({cur})", fmt(m["price"], "{:,.2f}" if us else "{:,.0f}"), "#1565C0")
+    kpi_box(k[1], f"時価総額(億{cur})", fmt(m["mcap_oku"], "{:,.0f}"), "#EF9A06")
     kpi_box(k[2], "PER", fmt(m["per"], "{:.2f}"), "#66BB6A")
     kpi_box(k[3], "ROE", fmt(m["roe_pct"], "{:.2f}", "%"), "#EF7360")
     kpi_box(k[4], "自己資本比率", fmt(m["equity_ratio"], "{:.1f}", "%"), "#4FC3F7", fg="#0d3b52")
@@ -326,14 +338,14 @@ def main():
     r1 = st.columns(2)
     with r1[0]:
         st.markdown("**業績推移**")
-        fig = perf_chart(m)
+        fig = perf_chart(m, cur)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("業績データなし")
     with r1[1]:
         st.markdown("**配当推移**")
-        fig = dividend_chart(detail, m)
+        fig = dividend_chart(detail, m, cur)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -342,7 +354,7 @@ def main():
     r2 = st.columns(2)
     with r2[0]:
         st.markdown("**財務推移**")
-        fig = finance_chart(m)
+        fig = finance_chart(m, cur)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
