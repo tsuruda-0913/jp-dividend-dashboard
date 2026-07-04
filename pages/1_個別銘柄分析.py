@@ -310,17 +310,26 @@ def main():
     with r1[0]:
         st.markdown("**業績推移**")
         fig = perf_chart(m)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("業績データなし")
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("業績データなし")
     with r1[1]:
         st.markdown("**配当推移**")
         fig = dividend_chart(detail, m)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("配当データなし")
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("配当データなし")
 
     r2 = st.columns(2)
     with r2[0]:
         st.markdown("**財務推移**")
         fig = finance_chart(m)
-        st.plotly_chart(fig, use_container_width=True) if fig else st.info("財務データなし")
+        if fig:
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("財務データなし")
     with r2[1]:
         st.markdown("**スコア（独自算出）**")
         st.plotly_chart(radar_chart(scores), use_container_width=True)

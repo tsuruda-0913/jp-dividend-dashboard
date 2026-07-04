@@ -223,18 +223,31 @@ def main():
             f"📋 Google スプレッドシートの銘柄リスト・財務指標を反映（{len(df)} 銘柄）。"
             "現在値と前日比のみライブ取得。前日比が小さい（下落が大きい）順に表示。"
         )
-        # 前日比が小さい（＝下落が大きい）順に並べる
-        styler = style_table(df.sort_values("前日比(%)", ascending=True, na_position="last"))
-        st.dataframe(
-            styler,
+        st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。")
+        # 前日比が小さい（＝下落が大きい）順に並べ、位置インデックスを揃える
+        sorted_df = (
+            df.sort_values("前日比(%)", ascending=True, na_position="last")
+            .reset_index(drop=True)
+        )
+        event = st.dataframe(
+            style_table(sorted_df),
             use_container_width=True,
             hide_index=True,
             height=740,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="stock_table",
             column_config={
                 "IRBANK": st.column_config.LinkColumn("IRBANK", display_text="決算情報"),
                 "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
             },
         )
+        # 行が選択されたら、その銘柄を個別分析ページで開く
+        selected = event.selection.rows if event and event.selection else []
+        if selected:
+            r = sorted_df.iloc[selected[0]]
+            st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
+            st.switch_page("pages/1_個別銘柄分析.py")
     except Exception as e:
         st.error(f"株価データの取得に失敗しました: {e}")
 
