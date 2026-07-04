@@ -82,6 +82,19 @@ def clamp(x, lo=0.0, hi=100.0):
     return max(lo, min(hi, x))
 
 
+def _ratio(numer, denom, y, scale=100):
+    """numer[y] / denom[y] * scale を安全に計算する。
+
+    どちらかの Series が None・その年が欠損・分母が 0 の場合は None を返す。
+    （年ごとにデータの有無がずれても TypeError を起こさないための保護）
+    """
+    n = numer.get(y) if numer is not None else None
+    d = denom.get(y) if denom is not None else None
+    if n is None or not d:
+        return None
+    return n / d * scale
+
+
 # ----------------------------------------------------------------------------
 # 指標・スコア計算
 # ----------------------------------------------------------------------------
@@ -191,10 +204,10 @@ def perf_chart(m: dict):
     years = [str(y) for y in rev.index]
     fig.add_bar(x=years, y=(rev / 1e6), name="売上高(百万円)", marker_color="#9E9E9E", secondary_y=False)
     if op is not None:
-        om = [op.get(y, None) / rev.get(y) * 100 if rev.get(y) else None for y in rev.index]
+        om = [_ratio(op, rev, y) for y in rev.index]
         fig.add_scatter(x=years, y=om, name="営業利益率", mode="lines+markers", line=dict(color="#EF5350"), secondary_y=True)
     if net is not None:
-        nm = [net.get(y, None) / rev.get(y) * 100 if rev.get(y) else None for y in rev.index]
+        nm = [_ratio(net, rev, y) for y in rev.index]
         fig.add_scatter(x=years, y=nm, name="純利益率", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
     fig.update_yaxes(title_text="売上高(百万円)", secondary_y=False)
     fig.update_yaxes(title_text="利益率(%)", secondary_y=True)
@@ -214,7 +227,7 @@ def finance_chart(m: dict):
     if liab is not None:
         fig.add_bar(x=[str(y) for y in liab.index], y=(-liab / 1e6), name="負債(百万円)", marker_color="#EF5350", secondary_y=False)
     if m["assets"] is not None and equity is not None:
-        er = [equity.get(y, None) / m["assets"].get(y) * 100 if m["assets"].get(y) else None for y in equity.index]
+        er = [_ratio(equity, m["assets"], y) for y in equity.index]
         fig.add_scatter(x=years, y=er, name="自己資本比率", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
     fig.update_yaxes(title_text="金額(百万円)", secondary_y=False)
     fig.update_yaxes(title_text="自己資本比率(%)", secondary_y=True)
@@ -236,7 +249,7 @@ def dividend_chart(detail: dict, m: dict):
     if eps is not None:
         fig.add_bar(x=[str(y) for y in eps.index], y=eps.values, name="EPS(円)", marker_color="#EF5350", secondary_y=False)
     if eps is not None and div_year is not None:
-        payout = [div_year.get(y, None) / eps.get(y) * 100 if eps.get(y) else None for y in eps.index]
+        payout = [_ratio(div_year, eps, y) for y in eps.index]
         fig.add_scatter(x=[str(y) for y in eps.index], y=payout, name="配当性向", mode="lines+markers", line=dict(color="#FFB300"), secondary_y=True)
     fig.update_yaxes(title_text="円", secondary_y=False)
     fig.update_yaxes(title_text="配当性向(%)", secondary_y=True)
