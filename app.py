@@ -277,7 +277,7 @@ def main():
     # --- 全体の軽いスタイル調整 ---
     st.markdown(
         """<style>
-        .block-container {padding-top: 1.2rem;}
+        .block-container {padding-top: 3.5rem;}
         div[data-testid="stTabs"] button p {font-size: 1.0em; font-weight: 600;}
         </style>""",
         unsafe_allow_html=True,
