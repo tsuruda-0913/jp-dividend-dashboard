@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """米国 高配当・増配ETF 分析ページ.
 
-HDV / SPYD / VYM / SCHD / VIG の5本を
+HDV / SPYD / VYM / SCHD / VIG / VTI の6本を
   ❶ セクター構成  ❷ 構成銘柄の重複関係（上位10銘柄ベース）  ❸ 分配金推移
 の3視点で比較し、個別ETFの詳細分析も行う。
 
@@ -24,6 +24,7 @@ ETFS = {
     "VYM": "バンガード 米国高配当株ETF",
     "SCHD": "シュワブ 米国配当株ETF",
     "VIG": "バンガード 米国増配株ETF",
+    "VTI": "バンガード トータル・ストック・マーケットETF",
 }
 
 ETF_COLORS = {
@@ -32,6 +33,7 @@ ETF_COLORS = {
     "VYM": "#2E7D32",
     "SCHD": "#8E24AA",
     "VIG": "#C62828",
+    "VTI": "#0097A7",
 }
 
 SECTOR_JA = {
@@ -90,7 +92,7 @@ def fetch_etf(symbol: str) -> dict:
     }
 
 
-@st.cache_data(ttl=3600, show_spinner="5本のETFを取得中…")
+@st.cache_data(ttl=3600, show_spinner="6本のETFを取得中…")
 def fetch_all() -> dict[str, dict]:
     return {sym: fetch_etf(sym) for sym in ETFS}
 
@@ -307,7 +309,7 @@ def main():
         """<div style="background:linear-gradient(90deg,#B71C1C,#1565C0);border-radius:14px;
         padding:18px 24px;color:#fff;margin-bottom:14px;">
         <span style="font-size:1.55em;font-weight:800;">🇺🇸 米国 高配当・増配ETF 分析</span>
-        <span style="margin-left:14px;font-size:.85em;opacity:.9;">HDV / SPYD / VYM / SCHD / VIG</span>
+        <span style="margin-left:14px;font-size:.85em;opacity:.9;">HDV / SPYD / VYM / SCHD / VIG / VTI</span>
         </div>""",
         unsafe_allow_html=True,
     )
@@ -340,7 +342,7 @@ def main():
         use_container_width=True, hide_index=True,
     )
 
-    tab_cmp, tab_ind = st.tabs(["📊 5本比較", "🔎 個別分析"])
+    tab_cmp, tab_ind = st.tabs(["📊 6本比較", "🔎 個別分析"])
 
     # ------------------------------------------------------------------ 比較
     with tab_cmp:
