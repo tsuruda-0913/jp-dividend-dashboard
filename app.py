@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-"""日本の高配当株 モニタリング ダッシュボード.
+"""日本 高配当株 ダッシュボード（トップ画面）.
 
-機能:
-  1. 株価一覧（現在値・前日比）
-  2. 「前日終値からの下落率」を色分けした下落表
-       5〜10% / 11〜15% / 16〜20% / 20%超 でセルを色分け
-  3. 日本の株価・経済ニュースが流れるタイムライン
+「今日、どの銘柄を見に行くべきか」を最短で判断するための画面。
+  - KPI 3枚（平均利回り / 利回りが過去レンジ上位の銘柄数 / 本日の最大下落）
+  - 銘柄一覧テーブル
+      前日比（下落の深刻度で色分け）・配当利回り・
+      利回り位置（現在の利回りが過去3年レンジのどの位置か 0〜100%）・
+      52週高値比・配当増減（TTM）
+  - 下落TOP10 / 配当利回りTOP10
+  - ニュースタイムライン
 
-データの更新は「今すぐ更新」ボタンで手動で行います（取得結果は1時間キャッシュ）。
+株価と配当履歴は yf.download(actions=True) で全銘柄まとめて一括取得する。
+データの更新は「今すぐ更新」ボタンで手動（取得結果は1時間キャッシュ）。
 
 実行: streamlit run app.py
 """
@@ -18,52 +22,33 @@ import datetime as dt
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import streamlit as st
-
 import plotly.graph_objects as go
+import streamlit as st
 import yfinance as yf
 
-from stocks import load_stocks, load_us_stocks, ticker_of
+import ui
+from stocks import load_stocks, ticker_of
 
 JST = ZoneInfo("Asia/Tokyo")
 
-# ----------------------------------------------------------------------------
-# 下落率の色分け設定
-# ----------------------------------------------------------------------------
-# (下限, 上限, 背景色, ラベル) ※下限 < 下落率 <= 上限
-DECLINE_BUCKETS = [
-    (20.0, float("inf"), "#C62828", "20%超の下落"),   # 濃い赤
-    (15.0, 20.0, "#EF6C00", "16〜20%の下落"),         # 濃いオレンジ
-    (10.0, 15.0, "#F9A825", "11〜15%の下落"),         # オレンジ
-    (5.0, 10.0, "#FFEE58", "5〜10%の下落"),           # 黄色
-]
-
-
-def bucket_for(decline: float):
-    """下落率(%)に対応する (背景色, 文字色, ラベル) を返す。該当なしは None。"""
-    if decline is None or pd.isna(decline):
-        return None
-    for low, high, color, label in DECLINE_BUCKETS:
-        if low < decline <= high:
-            # 濃い背景のときは文字を白に
-            text = "#FFFFFF" if color in ("#C62828", "#EF6C00") else "#000000"
-            return color, text, label
-    return None
-
 
 # ----------------------------------------------------------------------------
-# データ取得（1時間キャッシュ）
+# データ取得（1時間キャッシュ・全銘柄1バッチ）
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=3600, show_spinner="銘柄リストと株価を取得中…")
-def fetch_prices() -> pd.DataFrame:
-    """シートの銘柄リストを読み込み、株価・下落率を計算した DataFrame を返す。"""
-    stocks = load_stocks()
+@st.cache_data(ttl=3600, show_spinner="銘柄リストと株価・配当履歴を取得中…")
+def fetch_market_data() -> tuple[pd.DataFrame, bool]:
+    """シートの銘柄リストを読み込み、株価・利回りレンジ位置等を計算して返す。
+
+    戻り値: (一覧DataFrame, シート読込がフォールバックしたか)
+    """
+    stocks, fallback = load_stocks()
     tickers = [ticker_of(s["code"]) for s in stocks]
     raw = yf.download(
         tickers,
-        period="3mo",
+        period="3y",
         interval="1d",
         group_by="ticker",
+        actions=True,          # 配当履歴も同じ1回のリクエストで取得する
         auto_adjust=False,
         progress=False,
         threads=True,
@@ -72,6 +57,7 @@ def fetch_prices() -> pd.DataFrame:
     rows = []
     for s in stocks:
         tk = ticker_of(s["code"])
+        current = day_chg = from_high = yld_pos = div_chg = calc_yield = None
         try:
             df = raw[tk] if len(tickers) > 1 else raw
             close = df["Close"].dropna()
@@ -80,113 +66,65 @@ def fetch_prices() -> pd.DataFrame:
             current = float(close.iloc[-1])
             prev = float(close.iloc[-2]) if len(close) >= 2 else current
             day_chg = (current - prev) / prev * 100 if prev else None
+
+            end = close.index[-1]
+
+            # 52週高値からの下落率
+            last1y = close[close.index > end - pd.Timedelta(days=365)]
+            if not last1y.empty and last1y.max():
+                from_high = (current / float(last1y.max()) - 1) * 100
+
+            # 配当（TTM）と利回りレンジ位置
+            if "Dividends" in df.columns:
+                div = df["Dividends"].reindex(close.index).fillna(0.0)
+                ttm = div.rolling("365D").sum()
+                yld = (ttm / close * 100).dropna()
+                # 最初の1年はTTMが揃わないため除外
+                yld = yld[yld.index >= close.index[0] + pd.Timedelta(days=365)]
+                if len(yld) >= 200 and yld.iloc[-1] > 0:
+                    calc_yield = float(yld.iloc[-1])
+                    yld_pos = float((yld <= yld.iloc[-1]).mean() * 100)
+
+                last12 = float(div[div.index > end - pd.Timedelta(days=365)].sum())
+                prev12 = float(
+                    div[(div.index <= end - pd.Timedelta(days=365))
+                        & (div.index > end - pd.Timedelta(days=730))].sum()
+                )
+                if prev12 > 0 and last12 > 0:
+                    div_chg = (last12 / prev12 - 1) * 100
         except Exception:
-            current = day_chg = None
+            pass
+
+        # 表示する利回りはシート優先、無ければ株価と配当履歴から算出したTTM値
+        disp_yield = s.get("yield") if s.get("yield") is not None else calc_yield
 
         rows.append(
             {
                 "銘柄": s["name"],
                 "コード": s["code"],
                 "市場": s.get("market", ""),
+                "セクター": s.get("sector", ""),
                 "財務": s.get("finance", ""),
-                "現在値": current,            # yfinance のライブ値（更新ボタンで最新化）
-                "前日比(%)": day_chg,         # yfinance のライブ値
-                "ROE(自己資本利益率)(%)": s.get("roe"),
+                "現在値": current,
+                "前日比(%)": day_chg,
+                "配当利回り(%)": disp_yield,
+                "利回り位置": yld_pos,        # 過去3年レンジ内の位置(0-100, 高いほど割安寄り)
+                "52週高値比(%)": from_high,
+                "配当増減(%)": div_chg,       # 直近12か月 vs その前12か月（参考値）
+                "ROE(%)": s.get("roe"),
                 "自己資本比率(%)": s.get("equity_ratio"),
                 "流動比率(%)": s.get("current_ratio"),
                 "当座比率(%)": s.get("quick_ratio"),
-                "配当利回り(%)": s.get("yield"),
                 "IRBANK": s.get("irbank_url", ""),
                 "企業情報": s.get("info_url", ""),
             }
         )
 
-    out = pd.DataFrame(rows)
-    return out
-
-
-@st.cache_data(ttl=3600, show_spinner="米国株の株価・指標を取得中…")
-def fetch_prices_us() -> pd.DataFrame:
-    """米国株リストを読み込み、株価・前日比・利回り等を取得した DataFrame を返す。"""
-    from concurrent.futures import ThreadPoolExecutor
-
-    stocks = load_us_stocks()
-    tickers = [s["code"] for s in stocks]
-    raw = yf.download(
-        tickers,
-        period="5d",
-        interval="1d",
-        group_by="ticker",
-        auto_adjust=False,
-        progress=False,
-        threads=True,
-    )
-
-    # 配当利回り・セクターは info から並列取得（シートに利回りがあればそちら優先）
-    def get_info(sym: str) -> dict:
-        try:
-            info = yf.Ticker(sym).info or {}
-            # dividendYield は現行の yfinance では%値（例: 3.37）で返る
-            return {"yield": info.get("dividendYield"), "sector": info.get("sector")}
-        except Exception:
-            return {"yield": None, "sector": None}
-
-    need_info = [s["code"] for s in stocks]
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        infos = dict(zip(need_info, ex.map(get_info, need_info)))
-
-    rows = []
-    for s in stocks:
-        tk = s["code"]
-        try:
-            df = raw[tk] if len(tickers) > 1 else raw
-            close = df["Close"].dropna()
-            if close.empty:
-                raise ValueError("no data")
-            current = float(close.iloc[-1])
-            prev = float(close.iloc[-2]) if len(close) >= 2 else current
-            day_chg = (current - prev) / prev * 100 if prev else None
-        except Exception:
-            current = day_chg = None
-
-        inf = infos.get(tk, {})
-        rows.append(
-            {
-                "銘柄": s["name"],
-                "コード": tk,
-                "セクター": inf.get("sector") or "—",
-                "現在値($)": current,
-                "前日比(%)": day_chg,
-                "配当利回り(%)": s.get("yield") if s.get("yield") is not None else inf.get("yield"),
-                "Yahoo": s.get("yahoo_url", ""),
-                "企業情報": s.get("info_url", ""),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def style_table_us(df: pd.DataFrame):
-    """米国株テーブル用の Styler（前日比を下落幅で色分け）。"""
-
-    def color_daychg(val):
-        if val is None or pd.isna(val):
-            return ""
-        if val >= 0:
-            return "color: #2E7D32;"
-        b = bucket_for(-val)
-        if b is None:
-            return "color: #C62828;"
-        bg, text, _ = b
-        return f"background-color: {bg}; color: {text}; font-weight: 600;"
-
-    return df.style.map(color_daychg, subset=["前日比(%)"]).format(
-        {"現在値($)": "{:,.2f}", "前日比(%)": "{:+.2f}%", "配当利回り(%)": "{:.2f}%"},
-        na_rep="—",
-    )
+    return pd.DataFrame(rows), fallback
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_news(limit: int = 30) -> list[dict]:
+def fetch_news(limit: int = 15) -> list[dict]:
     """日本の経済・株価ニュースを RSS から取得して新しい順に返す。"""
     import feedparser
 
@@ -216,7 +154,6 @@ def fetch_news(limit: int = 30) -> list[dict]:
         except Exception:
             continue
 
-    # 重複タイトル除去
     seen = set()
     uniq = []
     for it in items:
@@ -235,7 +172,7 @@ def fetch_news(limit: int = 30) -> list[dict]:
 def market_is_open(now: dt.datetime | None = None) -> bool:
     """東証がザラ場中か（平日 9:00〜11:30 / 12:30〜15:00 JST）を判定。"""
     now = now or dt.datetime.now(JST)
-    if now.weekday() >= 5:  # 土日
+    if now.weekday() >= 5:
         return False
     t = now.time()
     morning = dt.time(9, 0) <= t <= dt.time(11, 30)
@@ -244,68 +181,110 @@ def market_is_open(now: dt.datetime | None = None) -> bool:
 
 
 # ----------------------------------------------------------------------------
-# 画面描画
+# 一覧テーブル
 # ----------------------------------------------------------------------------
-def style_table(df: pd.DataFrame):
-    """前日比セルを下落幅に応じて色分けした Styler を返す。"""
+SIMPLE_COLS = [
+    "銘柄", "コード", "現在値", "前日比(%)", "配当利回り(%)",
+    "利回り位置", "52週高値比(%)", "配当増減(%)", "IRBANK", "企業情報",
+]
+DETAIL_COLS = [
+    "銘柄", "コード", "市場", "セクター", "財務", "現在値", "前日比(%)",
+    "配当利回り(%)", "利回り位置", "52週高値比(%)", "配当増減(%)",
+    "ROE(%)", "自己資本比率(%)", "流動比率(%)", "当座比率(%)", "IRBANK", "企業情報",
+]
 
-    def color_daychg(val):
+NUM_FMT = {
+    "現在値": "{:,.1f}",
+    "前日比(%)": "{:+.2f}%",
+    "配当利回り(%)": "{:.2f}%",
+    "52週高値比(%)": "{:+.1f}%",
+    "配当増減(%)": "{:+.1f}%",
+    "ROE(%)": "{:.1f}%",
+    "自己資本比率(%)": "{:.2f}%",
+    "流動比率(%)": "{:.2f}%",
+    "当座比率(%)": "{:.2f}%",
+}
+
+
+def style_table(df: pd.DataFrame):
+    """前日比を下落深刻度で、配当増減のマイナスを赤で色分けした Styler。"""
+
+    def color_divchg(val):
         if val is None or pd.isna(val):
             return ""
-        if val >= 0:
-            return "color: #2E7D32;"  # 上昇は緑
-        b = bucket_for(-val)  # 下落幅(%)で色分け
-        if b is None:
-            return "color: #C62828;"  # 5%未満の下落は赤文字のみ
-        bg, text, _ = b
-        return f"background-color: {bg}; color: {text}; font-weight: 600;"
+        return f"color: {ui.DOWN}; font-weight: 600;" if val < 0 else ""
 
-    styler = (
-        df.style
-        .map(color_daychg, subset=["前日比(%)"])
-        .format(
-            {
-                "現在値": "{:,.1f}",
-                "前日比(%)": "{:+.2f}%",
-                "ROE(自己資本利益率)(%)": "{:.1f}%",
-                "自己資本比率(%)": "{:.2f}%",
-                "流動比率(%)": "{:.2f}%",
-                "当座比率(%)": "{:.2f}%",
-                "配当利回り(%)": "{:.2f}%",
-            },
-            na_rep="—",
-        )
-    )
+    fmt = {k: v for k, v in NUM_FMT.items() if k in df.columns}
+    styler = df.style.map(ui.daychg_style, subset=["前日比(%)"]).format(fmt, na_rep="—")
+    if "配当増減(%)" in df.columns:
+        styler = styler.map(color_divchg, subset=["配当増減(%)"])
     return styler
 
 
-def kpi_card(col, label, value, sub, gradient, icon=""):
-    """グラデーション背景のKPIカードを描画する。"""
-    col.markdown(
-        f"""<div style="background:linear-gradient(135deg,{gradient});border-radius:14px;
-        padding:14px 16px;color:#fff;box-shadow:0 4px 10px rgba(0,0,0,.12);min-height:104px;">
-        <div style="font-size:.78em;opacity:.9;letter-spacing:.05em;">{icon} {label}</div>
-        <div style="font-size:1.7em;font-weight:800;line-height:1.4;">{value}</div>
-        <div style="font-size:.75em;opacity:.85;">{sub}</div></div>""",
-        unsafe_allow_html=True,
+def render_table(df: pd.DataFrame):
+    detail = st.toggle("財務指標も表示（市場・ROE・自己資本比率など）", value=False)
+    cols = DETAIL_COLS if detail else SIMPLE_COLS
+    cols = [c for c in cols if c in df.columns]
+    # セクター列はシートに値があるときだけ出す
+    if "セクター" in cols and not df["セクター"].astype(str).str.strip().any():
+        cols.remove("セクター")
+
+    sorted_df = (
+        df.sort_values("前日比(%)", ascending=True, na_position="last")
+        .reset_index(drop=True)
     )
+    st.caption(
+        "👆 行をクリックすると個別銘柄の分析ページへ移動します（下落が大きい順に表示）。"
+        "「利回り位置」= 現在の配当利回りが過去3年レンジのどこにあるか。"
+        "100%に近いほど過去との比較では高利回り＝割安寄り。ただし減配リスク（配当増減がマイナス）に注意。"
+    )
+    event = st.dataframe(
+        style_table(sorted_df[cols]),
+        use_container_width=True,
+        hide_index=True,
+        height=600,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="stock_table_jp",
+        column_config={
+            "利回り位置": st.column_config.ProgressColumn(
+                "利回り位置(3年)", min_value=0, max_value=100, format="%.0f%%",
+                help="現在の配当利回りが過去3年の利回りレンジのどの位置にあるか。100%に近いほど過去比で高利回り（＝株価は割安寄り）",
+            ),
+            "52週高値比(%)": st.column_config.NumberColumn(
+                help="52週高値からの下落率。買い場探しの参考",
+            ),
+            "配当増減(%)": st.column_config.NumberColumn(
+                "配当増減(TTM)",
+                help="直近12か月の配当合計をその前の12か月と比較（yfinance由来の参考値）。マイナスは減配の可能性",
+            ),
+            "IRBANK": st.column_config.LinkColumn("IRBANK", display_text="決算情報"),
+            "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
+        },
+    )
+    selected = event.selection.rows if event and event.selection else []
+    if selected:
+        r = sorted_df.iloc[selected[0]]
+        st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
+        st.switch_page("pages/1_個別銘柄分析.py")
 
 
+# ----------------------------------------------------------------------------
+# TOP10 チャート
+# ----------------------------------------------------------------------------
 def color_for_decline(chg: float) -> str:
-    """前日比(%)から棒グラフ用の色を返す。"""
     if chg >= 0:
-        return "#2E7D32"
-    b = bucket_for(-chg)
+        return ui.UP
+    b = ui.bucket_for(-chg)
     return b[0] if b else "#E57373"
 
 
 def decline_top_chart(df: pd.DataFrame, n: int = 10):
-    """本日の下落TOP n 横棒グラフ。"""
     d = df.dropna(subset=["前日比(%)"]).nsmallest(n, "前日比(%)")
     d = d[d["前日比(%)"] < 0]
     if d.empty:
         return None
-    d = d.iloc[::-1]  # 大きい下落を上に
+    d = d.iloc[::-1]
     fig = go.Figure(
         go.Bar(
             x=d["前日比(%)"], y=d["銘柄"], orientation="h",
@@ -316,16 +295,12 @@ def decline_top_chart(df: pd.DataFrame, n: int = 10):
             hovertemplate="%{y} (%{customdata})<br>前日比 %{x:+.2f}%<extra></extra>",
         )
     )
-    fig.update_layout(
-        height=360, margin=dict(l=10, r=50, t=10, b=10),
-        xaxis_title="前日比(%)", yaxis=dict(tickfont=dict(size=11)),
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
+    ui.apply_layout(fig, height=360, xaxis_title="前日比(%)")
+    fig.update_yaxes(tickfont=dict(size=11))
     return fig
 
 
 def yield_top_chart(df: pd.DataFrame, n: int = 10):
-    """配当利回りTOP n 横棒グラフ。"""
     d = df.dropna(subset=["配当利回り(%)"]).nlargest(n, "配当利回り(%)")
     if d.empty:
         return None
@@ -333,173 +308,23 @@ def yield_top_chart(df: pd.DataFrame, n: int = 10):
     fig = go.Figure(
         go.Bar(
             x=d["配当利回り(%)"], y=d["銘柄"], orientation="h",
-            marker=dict(color=d["配当利回り(%)"], colorscale=[[0, "#90CAF9"], [1, "#1565C0"]]),
+            marker=dict(color=d["配当利回り(%)"],
+                        colorscale=[[0, ui.PRIMARY_LIGHT], [1, ui.PRIMARY]]),
             text=[f"{v:.2f}%" for v in d["配当利回り(%)"]],
             textposition="outside", cliponaxis=False,
             customdata=d["コード"],
             hovertemplate="%{y} (%{customdata})<br>利回り %{x:.2f}%<extra></extra>",
         )
     )
-    fig.update_layout(
-        height=360, margin=dict(l=10, r=50, t=10, b=10),
-        xaxis_title="配当利回り(%)", yaxis=dict(tickfont=dict(size=11)),
-        plot_bgcolor="rgba(0,0,0,0)",
-    )
+    ui.apply_layout(fig, height=360, xaxis_title="配当利回り(%)")
+    fig.update_yaxes(tickfont=dict(size=11))
     return fig
 
 
-def main():
-    st.set_page_config(page_title="日米 高配当株 ダッシュボード", page_icon="📈", layout="wide")
-
-    now = dt.datetime.now(JST)
-    is_open = market_is_open(now)
-
-    # --- 全体の軽いスタイル調整 ---
-    st.markdown(
-        """<style>
-        .block-container {padding-top: 3.5rem;}
-        div[data-testid="stTabs"] button p {font-size: 1.0em; font-weight: 600;}
-        </style>""",
-        unsafe_allow_html=True,
-    )
-
-    # --- ヘッダーバナー ---
-    status = "🟢 ザラ場中" if is_open else "⚪ 市場時間外"
-    h1, h2 = st.columns([5, 1])
-    h1.markdown(
-        f"""<div style="background:linear-gradient(90deg,#0D2B52,#1565C0);border-radius:14px;
-        padding:18px 24px;color:#fff;">
-        <span style="font-size:1.55em;font-weight:800;">📈 日米 高配当株 ダッシュボード</span>
-        <span style="margin-left:14px;font-size:.85em;opacity:.9;">{status}　|　最終更新 {now:%m/%d %H:%M} JST</span>
-        </div>""",
-        unsafe_allow_html=True,
-    )
-    with h2:
-        if st.button("🔄 今すぐ更新", use_container_width=True):
-            st.cache_data.clear()
-            st.rerun()
-        if st.button("🇺🇸 米国ETF分析", use_container_width=True):
-            st.switch_page("pages/2_米国ETF分析.py")
-
-    # --- 市場タブ ---
-    tab_jp, tab_us = st.tabs(["🇯🇵 日本株", "🇺🇸 米国株"])
-
-    # ------------------------------------------------------------ 日本株
-    with tab_jp:
-        try:
-            df = fetch_prices()
-        except Exception as e:
-            st.error(f"株価データの取得に失敗しました: {e}")
-            df = None
-
-        if df is not None:
-            render_overview(df, list_sub="Googleシート連携")
-
-            sub_list, sub_news = st.tabs(["📋 銘柄一覧", "📰 ニュース"])
-            with sub_list:
-                st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
-                sorted_df = (
-                    df.sort_values("前日比(%)", ascending=True, na_position="last")
-                    .reset_index(drop=True)
-                )
-                event = st.dataframe(
-                    style_table(sorted_df),
-                    use_container_width=True,
-                    hide_index=True,
-                    height=600,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    key="stock_table_jp",
-                    column_config={
-                        "IRBANK": st.column_config.LinkColumn("IRBANK", display_text="決算情報"),
-                        "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
-                    },
-                )
-                selected = event.selection.rows if event and event.selection else []
-                if selected:
-                    r = sorted_df.iloc[selected[0]]
-                    st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
-                    st.switch_page("pages/1_個別銘柄分析.py")
-            with sub_news:
-                render_news()
-
-    # ------------------------------------------------------------ 米国株
-    with tab_us:
-        try:
-            df_us = fetch_prices_us()
-        except Exception as e:
-            st.error(f"米国株データの取得に失敗しました: {e}")
-            df_us = None
-
-        if df_us is not None:
-            render_overview(df_us, list_sub="シートの米国株タブ連携")
-
-            st.caption("👆 行をクリックすると、その銘柄の「個別銘柄分析」ページへ移動します。下落が大きい順に表示。")
-            sorted_us = (
-                df_us.sort_values("前日比(%)", ascending=True, na_position="last")
-                .reset_index(drop=True)
-            )
-            event_us = st.dataframe(
-                style_table_us(sorted_us),
-                use_container_width=True,
-                hide_index=True,
-                height=600,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="stock_table_us",
-                column_config={
-                    "Yahoo": st.column_config.LinkColumn("Yahoo", display_text="Yahoo Finance"),
-                    "企業情報": st.column_config.LinkColumn("企業情報", display_text="Google検索"),
-                },
-            )
-            selected_us = event_us.selection.rows if event_us and event_us.selection else []
-            if selected_us:
-                r = sorted_us.iloc[selected_us[0]]
-                st.session_state["selected_label"] = f"{r['コード']}_{r['銘柄']}"
-                st.switch_page("pages/1_個別銘柄分析.py")
-
-
-def render_overview(df: pd.DataFrame, list_sub: str):
-    """KPIカードと下落/利回りTOP10グラフを描画する（日米共通）。"""
-    chg = df["前日比(%)"].dropna()
-    up_n = int((chg > 0).sum())
-    down_n = int((chg < 0).sum())
-    avg_chg = chg.mean() if not chg.empty else None
-    avg_yield = df["配当利回り(%)"].dropna().mean()
-    if not chg.empty:
-        worst = df.loc[df["前日比(%)"].idxmin()]
-        worst_txt, worst_sub = f"{worst['前日比(%)']:+.2f}%", worst["銘柄"]
-    else:
-        worst_txt, worst_sub = "—", ""
-
-    st.write("")
-    k = st.columns(5)
-    kpi_card(k[0], "監視銘柄", f"{len(df)}", list_sub, "#42A5F5,#1565C0", "📋")
-    kpi_card(k[1], "上昇 / 下落", f"{up_n} / {down_n}", "前日比ベース", "#66BB6A,#2E7D32", "⚖️")
-    kpi_card(k[2], "平均前日比", f"{avg_chg:+.2f}%" if avg_chg is not None else "—", "全銘柄平均", "#FFB74D,#EF6C00", "📊")
-    kpi_card(k[3], "平均配当利回り", f"{avg_yield:.2f}%" if pd.notna(avg_yield) else "—", "全銘柄平均", "#AB47BC,#6A1B9A", "💰")
-    kpi_card(k[4], "本日の最大下落", worst_txt, worst_sub, "#EF5350,#B71C1C", "📉")
-
-    st.write("")
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown("##### 📉 本日の下落 TOP10")
-        fig = decline_top_chart(df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("本日下落している銘柄はありません。")
-    with g2:
-        st.markdown("##### 💰 配当利回り TOP10")
-        fig = yield_top_chart(df)
-        if fig:
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("配当利回りデータがありません。")
-
-
+# ----------------------------------------------------------------------------
+# ニュース
+# ----------------------------------------------------------------------------
 def render_news():
-    """ニュースタイムラインを描画する。"""
     try:
         news = fetch_news()
         if not news:
@@ -507,15 +332,101 @@ def render_news():
         for it in news:
             ts = it["published"].strftime("%m/%d %H:%M") if it["published"] else "--/-- --:--"
             st.markdown(
-                f"<div style='border-left:3px solid #1976D2;background:rgba(25,118,210,.04);"
+                f"<div style='border-left:3px solid {ui.PRIMARY};background:rgba(26,92,176,.05);"
                 f"border-radius:0 8px 8px 0;padding:6px 12px;margin:8px 0;'>"
-                f"<span style='color:#888;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
+                f"<span style='opacity:.6;font-size:0.8em;'>🕒 {ts}　|　{it['source']}</span><br>"
                 f"<a href='{it['link']}' target='_blank' style='text-decoration:none;font-weight:600;'>"
                 f"{it['title']}</a></div>",
                 unsafe_allow_html=True,
             )
     except Exception as e:
         st.warning(f"ニュースの取得に失敗しました: {e}")
+
+
+# ----------------------------------------------------------------------------
+# メイン
+# ----------------------------------------------------------------------------
+def main():
+    st.set_page_config(page_title="高配当株ダッシュボード", page_icon="📈", layout="wide")
+
+    now = dt.datetime.now(JST)
+    status = "🟢 ザラ場中" if market_is_open(now) else "⚪ 市場時間外"
+
+    # --- ヘッダー（状態バー） ---
+    h1, h2, h3 = st.columns([5, 1, 1.2])
+    with h1:
+        st.title("📈 高配当株ダッシュボード")
+        st.caption(f"{status}　|　最終更新 {now:%m/%d %H:%M} JST　|　銘柄リスト: Googleシート連携")
+    with h2:
+        st.write("")
+        if st.button("🔄 今すぐ更新", use_container_width=True):
+            # 対象を限定してクリア（個別ページ等の重いキャッシュは温存する）
+            fetch_market_data.clear()
+            fetch_news.clear()
+            st.rerun()
+    with h3:
+        st.write("")
+        if st.button("🇺🇸 米国ETF分析へ", use_container_width=True):
+            st.switch_page("pages/2_米国ETF分析.py")
+
+    # --- データ取得 ---
+    try:
+        df, fallback = fetch_market_data()
+    except Exception as e:
+        st.error(f"株価データの取得に失敗しました: {e}")
+        return
+
+    if fallback:
+        st.warning(
+            "⚠️ Googleスプレッドシートを読み込めなかったため、最小限のフォールバック銘柄"
+            f"（{len(df)}件）で表示しています。シートの共有設定（リンクを知っている全員が閲覧可）と"
+            "ネットワークをご確認のうえ「今すぐ更新」を押してください。"
+        )
+
+    # --- KPI 3枚 ---
+    chg = df["前日比(%)"].dropna()
+    avg_yield = df["配当利回り(%)"].dropna().mean()
+    high_pos_n = int((df["利回り位置"].dropna() >= 80).sum())
+    k1, k2, k3 = st.columns(3)
+    with k1, st.container(border=True):
+        st.metric("平均配当利回り", ui.fmt(avg_yield, "{:.2f}", "%"),
+                  help="監視銘柄全体の平均")
+    with k2, st.container(border=True):
+        st.metric("利回りが過去レンジ上位の銘柄", f"{high_pos_n} 銘柄",
+                  help="現在の配当利回りが過去3年レンジの上位20%（利回り位置80%以上）にある銘柄数。割安候補の目安")
+    with k3, st.container(border=True):
+        if not chg.empty:
+            worst = df.loc[df["前日比(%)"].idxmin()]
+            st.metric("本日の最大下落", f"{worst['前日比(%)']:+.2f}%",
+                      delta=str(worst["銘柄"]), delta_color="off")
+        else:
+            st.metric("本日の最大下落", "—")
+
+    # --- タブ ---
+    tab_list, tab_news = st.tabs(["📋 銘柄一覧", "📰 ニュース"])
+
+    with tab_list:
+        render_table(df)
+
+        st.write("")
+        g1, g2 = st.columns(2)
+        with g1:
+            st.markdown("##### 📉 本日の下落 TOP10")
+            fig = decline_top_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("本日下落している銘柄はありません。")
+        with g2:
+            st.markdown("##### 💰 配当利回り TOP10")
+            fig = yield_top_chart(df)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("配当利回りデータがありません。")
+
+    with tab_news:
+        render_news()
 
 
 if __name__ == "__main__":

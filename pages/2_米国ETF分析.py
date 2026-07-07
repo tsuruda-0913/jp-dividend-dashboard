@@ -16,6 +16,9 @@ import streamlit as st
 import yfinance as yf
 import plotly.graph_objects as go
 
+import ui
+from ui import show_chart, sigma_badge
+
 st.set_page_config(page_title="米国ETF分析", page_icon="🇺🇸", layout="wide")
 
 ETFS = {
@@ -281,76 +284,6 @@ def dividend_bar(d: dict, color: str):
     return fig
 
 
-def bollinger_chart(d: dict, color: str, days: int, window: int = 20):
-    """ボリンジャーバンド（20日移動平均±1σ/±2σ）付き株価チャート。
-
-    戻り値: (figure, 現在値のσ位置z)。データ不足時は (None, None)。
-    """
-    p = d["price"]
-    if p is None or p.empty or len(p) < window + 5:
-        return None, None
-    sma = p.rolling(window).mean()
-    std = p.rolling(window).std()
-
-    x = p.index[-days:]
-    def s(series):
-        return series.iloc[-days:]
-
-    fig = go.Figure()
-    # ±2σ帯（薄い塗り）
-    fig.add_scatter(x=x, y=s(sma + 2 * std), line=dict(width=0), showlegend=False, hoverinfo="skip")
-    fig.add_scatter(x=x, y=s(sma - 2 * std), line=dict(width=0), fill="tonexty",
-                    fillcolor="rgba(21,101,192,.08)", name="±2σ", hoverinfo="skip")
-    # ±1σ帯（やや濃い塗り）
-    fig.add_scatter(x=x, y=s(sma + std), line=dict(width=0), showlegend=False, hoverinfo="skip")
-    fig.add_scatter(x=x, y=s(sma - std), line=dict(width=0), fill="tonexty",
-                    fillcolor="rgba(21,101,192,.15)", name="±1σ", hoverinfo="skip")
-    # 移動平均と株価
-    fig.add_scatter(x=x, y=s(sma), name=f"{window}日移動平均", mode="lines",
-                    line=dict(color="#757575", width=1.5, dash="dash"),
-                    hovertemplate="%{x|%Y/%m/%d} 平均: $%{y:.2f}<extra></extra>")
-    fig.add_scatter(x=x, y=s(p), name="株価", mode="lines",
-                    line=dict(color=color, width=2.2),
-                    hovertemplate="%{x|%Y/%m/%d}: $%{y:.2f}<extra></extra>")
-    fig.update_layout(
-        height=380, margin=dict(l=10, r=10, t=10, b=10), yaxis_title="株価($)",
-        legend=dict(orientation="h", y=1.1), hovermode="x unified",
-    )
-
-    z = None
-    if pd.notna(std.iloc[-1]) and std.iloc[-1]:
-        z = float((p.iloc[-1] - sma.iloc[-1]) / std.iloc[-1])
-    return fig, z
-
-
-def sigma_badge(z: float | None) -> str:
-    """現在値のσ位置を説明するバッジHTMLを返す。"""
-    if z is None:
-        return ""
-    if z >= 2:
-        col, desc = "#C62828", "＋2σ超：過去平均よりかなり高い水準（過熱気味）"
-    elif z >= 1:
-        col, desc = "#EF6C00", "＋σ側：過去平均より高い水準"
-    elif z > -1:
-        col, desc = "#616161", "±σ圏内：過去平均に近い水準"
-    elif z > -2:
-        col, desc = "#1565C0", "−σ側：過去平均より低い水準"
-    else:
-        col, desc = "#0D47A1", "−2σ超：過去平均よりかなり低い水準"
-    return (
-        f"<span style='background:{col};color:#fff;padding:4px 12px;border-radius:12px;"
-        f"font-weight:700;'>現在位置 {z:+.2f}σ</span>"
-        f"<span style='margin-left:10px;color:{col};font-weight:600;'>{desc}</span>"
-    )
-
-
-def show_chart(fig, empty_msg: str):
-    if fig:
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info(empty_msg)
-
-
 # ----------------------------------------------------------------------------
 # メイン
 # ----------------------------------------------------------------------------
@@ -358,14 +291,8 @@ def main():
     if st.sidebar.button("← 銘柄一覧に戻る", use_container_width=True):
         st.switch_page("app.py")
 
-    st.markdown(
-        """<div style="background:linear-gradient(90deg,#B71C1C,#1565C0);border-radius:14px;
-        padding:18px 24px;color:#fff;margin-bottom:14px;">
-        <span style="font-size:1.55em;font-weight:800;">🇺🇸 米国 高配当・増配ETF 分析</span>
-        <span style="margin-left:14px;font-size:.85em;opacity:.9;">HDV / SPYD / VYM / SCHD / VIG / VTI</span>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    st.title("🇺🇸 米国 高配当・増配ETF 分析")
+    st.caption("HDV / SPYD / VYM / SCHD / VIG / VTI の6本を比較・個別分析")
 
     try:
         data = fetch_all()
@@ -470,7 +397,7 @@ def main():
                 index=1, horizontal=True, key=f"bb_period_{sym}",
             )
             days = {"3か月": 66, "6か月": 126, "1年": 252, "5年": 10 ** 6}[period]
-            fig_bb, z = bollinger_chart(d, color, days)
+            fig_bb, z = ui.bollinger_chart(d["price"], color, days, currency="$")
             if fig_bb:
                 st.markdown(sigma_badge(z), unsafe_allow_html=True)
                 st.plotly_chart(fig_bb, use_container_width=True)

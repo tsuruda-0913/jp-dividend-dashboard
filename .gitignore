@@ -10,3 +10,6 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Claude Code（ローカル用設定）
+.claude/
